@@ -21,8 +21,9 @@ import sys
 import time
 from collections import OrderedDict
 from distutils.version import StrictVersion
+from six import string_types
 from zipfile import ZipFile, ZIP_DEFLATED
-from xml.etree import ElementTree
+from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
 sys.path.insert(0, '/Library/Application Support/JSSImporter')
@@ -38,7 +39,7 @@ from autopkglib import Processor, ProcessorError
 
 
 __all__ = ["JSSImporter"]
-__version__ = "1.0.5"
+__version__ = "1.1.0"
 REQUIRED_PYTHON_JSS_VERSION = StrictVersion("2.0.1")
 
 
@@ -381,7 +382,7 @@ class JSSImporter(Processor):
                 # Category doesn't exist
                 category = jss.Category(self.jss, category_name)
                 category.save()
-                self.wait_for_id(jss.Category, category)
+                self.wait_for_id('Category', category)
                 try:
                     category.id
                     self.output(
@@ -395,27 +396,30 @@ class JSSImporter(Processor):
             category = None
         return category
 
-    def wait_for_id(self, obj_cls, obj_name):
+    def wait_for_id(self, obj_type, object):
         """wait for feedback that the object is there"""
-        object = None
-        search_method = getattr(self.jss, obj_cls.__name__)
-        # limit time to wait to get a package ID.
         timeout = time.time() + 60
         while time.time() < timeout:
             try:
-                object = search_method(obj_name)
-                if int(object.id) != 0:
-                    # self.output("{} ID '{}' verified on server".format(obj_cls.__name__, object.id))
-                    self.upload_needed = True
-                    return object
-                else:
-                    self.output("Waiting to get {} ID from server (reported: {})"
-                                "...".format(obj_cls.__name__, object.id))
-                    time.sleep(10)
-            except jss.GetError:
+                self.output("Second pass: {} object ID: {}".format(obj_type, object.id))
+                return object.id
+            except (ValueError, AttributeError):
                 self.output("Waiting to get {} ID from server (none reported)"
-                            "...".format(obj_cls.__name__))
+                            "...".format(obj_type))
                 time.sleep(10)
+        return 0
+
+            # try:
+            #     object = search_method(obj_name)
+            #     if int(object.id) != 0:
+            #         # self.output("{} ID '{}' verified on server".format(obj_cls.__name__, object.id))
+            #         self.upload_needed = True
+            #         return object
+            #     else:
+            #         self.output("Waiting to get {} ID from server (reported: {})"
+            #                     "...".format(obj_cls.__name__, object.id))
+            #         time.sleep(10)
+            # except (jss.GetError, AttributeError):
 
     def handle_package(self):
         """Creates or updates, and copies a package object.
@@ -468,7 +472,7 @@ class JSSImporter(Processor):
             # object.
             if self.repo_type() == "JDS" or self.repo_type() == "CDP" or self.repo_type() == "AWS":
                 self.copy(pkg_path)
-                package = self.wait_for_id(jss.Package, self.pkg_name)
+                package = self.wait_for_id('Package', self.pkg_name)
                 try:
                     self.output("First pass (cloud): Package object ID: {}".format(package.id))
                     pkg_update = (self.env["jss_changed_objects"]["jss_package_added"])
@@ -494,7 +498,7 @@ class JSSImporter(Processor):
                 package.save()
                 pkg_update = (self.env["jss_changed_objects"]["jss_package_added"])
                 # test check
-                package = self.wait_for_id(jss.Package, package)
+                package = self.wait_for_id('Package', package)
                 try:
                     self.output("First pass (local): Package object ID: {}".format(package.id))
                     pkg_update = (self.env["jss_changed_objects"]["jss_package_added"])
@@ -514,10 +518,9 @@ class JSSImporter(Processor):
                         self.env["STOP_IF_NO_JSS_UPLOAD"]))
             self.env["stop_processing_recipe"] = True
             return
-        elif (self.env["STOP_IF_NO_JSS_UPLOAD"] is False
-                and not self.upload_needed):
-            self.output("Overwriting policy although upload requirement is determined as {} "
-                        "because STOP_IF_NO_JSS_UPLOAD is set to {}.".format(self.upload_needed,
+        else:
+            self.output("Overwriting policy - upload requirement is determined as {} "
+                        "and STOP_IF_NO_JSS_UPLOAD is set to {}.".format(self.upload_needed,
                         self.env["STOP_IF_NO_JSS_UPLOAD"]))
 
         # now update the package object
@@ -529,11 +532,8 @@ class JSSImporter(Processor):
         package_boot_volume_required = self.env.get(
             "package_boot_volume_required")
 
-        self.wait_for_id(jss.Package, package)
-        try:
-            self.output("Second pass: Package object ID: {}".format(package.id))
-            pkg_update = (self.env["jss_changed_objects"]["jss_package_added"])
-        except ValueError:
+        returned_id = self.wait_for_id('Package', package)
+        if returned_id == 0:
             raise ProcessorError("Failed to get Package ID from {}.".format(self.repo_type()))
 
         if self.category is not None:
@@ -728,7 +728,7 @@ class JSSImporter(Processor):
         # First, add in AutoPkg's env, excluding types that don't make
         # sense:
         replace_dict = {key: val for key, val in self.env.items()
-                        if val is not None and isinstance(val, basestring)}
+                        if val is not None and isinstance(val, string_types)}
 
         # Next, add in "official" and Legacy input variables.
         replace_dict["VERSION"] = self.version
@@ -798,6 +798,7 @@ class JSSImporter(Processor):
         if category_name is not None:
             self.handle_category(obj_cls.root_tag, category_name)
 
+        # set the "name" property of the templated object if not provided
         if not name:
             name = recipe_object.name
 
@@ -817,9 +818,11 @@ class JSSImporter(Processor):
             # a category tag if it isn't there.
             if self.env.get('policy_category'):
                 policy_category = recipe_object.find('category')
+                self.output("GPTEMP: %s" % recipe_object.name)
                 if policy_category is None:
-                    policy_category = ElementTree.SubElement(
-                        recipe_object, "category")
+                    general_object = ET.Element(recipe_object)
+                    policy_category = ET.SubElement(
+                        general_object, "category")
                 policy_category.text = self.env.get('policy_category')
 
             if existing_object is not None:
@@ -850,7 +853,7 @@ class JSSImporter(Processor):
         # If object is a script, add the passed contents to the object.
         # throw it into the `script_contents` tag of the object.
         if obj_cls is jss.Script and script_contents:
-            tag = ElementTree.SubElement(recipe_object, "script_contents")
+            tag = ET.SubElement(recipe_object, "script_contents")
             tag.text = script_contents
 
         if existing_object is not None:
@@ -860,22 +863,33 @@ class JSSImporter(Processor):
             recipe_object._basic_identity["id"] = existing_object.id
             recipe_object.save()
             # get feedback that the object has been created
-            object = self.wait_for_id(obj_cls, name)
+            # object = self.wait_for_id(obj_cls.__name__, name)
+
+            # Check for an existing object with this name.
+            object = None
+            search_method = getattr(self.jss, obj_cls.__name__)
             try:
-                object.id
-                # Retrieve the updated XML.
-                recipe_object = search_method(name)
+                object = search_method(name)
                 self.output("{} '{}' updated (ID: {}).".format(obj_cls.__name__, name, object.id))
-                if update_env:
-                    self.env["jss_changed_objects"][update_env].append(name)
-            except ValueError:
+            except jss.GetError:
                 raise ProcessorError("Failed to get {} ID from {}.".format(obj_cls.__name__, self.repo_type()))
+
+            #
+            # try:
+            #     object.id
+            #     # Retrieve the updated XML.
+            #     recipe_object = search_method(name)
+            #     self.output("{} '{}' updated (ID: {}).".format(obj_cls.__name__, name, object.id))
+            #     if update_env:
+            #         self.env["jss_changed_objects"][update_env].append(name)
+            # except ValueError:
+            #     raise ProcessorError("Failed to get {} ID from {}.".format(obj_cls.__name__, self.repo_type()))
 
         else:
             # Object doesn't exist yet.
             recipe_object.save()
             # get feedback that the object has been created
-            object = self.wait_for_id(obj_cls, name)
+            # object = self.wait_for_id(obj_cls.__name__, name)
             try:
                 object.id
                 self.output("{} '{}' updated (ID: {}).".format(obj_cls.__name__, name, object.id))
@@ -954,7 +968,7 @@ class JSSImporter(Processor):
         unique_parent_dirs = OrderedDict()
         for parent in parent_recipe_dirs:
             unique_parent_dirs[parent] = parent
-        search_dirs = ([os.path.dirname(path)] + unique_parent_dirs.keys())
+        search_dirs = ([os.path.dirname(path)] + list(unique_parent_dirs.keys()))
 
         tested = []
         final_path = ""
@@ -995,7 +1009,7 @@ class JSSImporter(Processor):
         Returns:
             The text after replacement.
         """
-        for key, value in replace_dict.iteritems():
+        for key, value in replace_dict.items():
             # Wrap our keys in % to match template tags.
             value = escape(value)
             text = text.replace("%%%s%%" % key, value)
@@ -1082,7 +1096,7 @@ class JSSImporter(Processor):
         for script in self.scripts:
             script_element = policy_template.add_object_to_path(
                 script, scripts_element)
-            priority = ElementTree.SubElement(script_element, "priority")
+            priority = ET.SubElement(script_element, "priority")
             priority.text = script.findtext("priority")
 
     def add_package_to_policy(self, policy_template):
@@ -1103,10 +1117,27 @@ class JSSImporter(Processor):
     def ensure_xml_structure(self, element, path):
         """Ensure that all tiers of an XML hierarchy exist."""
         search, _, path = path.partition("/")
+        self.output("GPTEMP path: %s" % path)
         if search:
             if element.find(search) is None:
-                ElementTree.SubElement(element, search)
-            return self.ensure_xml_structure(element.find(search), path)
+                search_element = ET.Element(element)
+                search_result = ET.SubElement(search_element, search)
+                if not isinstance(search_result, str):
+                    search_result = "No search result"
+                self.output("GPTEMP search_result: %s" % search_result)
+                if element.find(search):
+                    return self.ensure_xml_structure(element.find(search), path)
+                self.output("GPTEMP: I guess we give up here")
+
+            # try:
+            #     element.find(search)
+            # except AttributeError:
+            #     search_element = ET.Element(element)
+            #     ET.SubElement(search_element, search)
+            #     try:
+            #         return self.ensure_xml_structure(element.find(search), path)
+            #     except AttributeError:
+            #         self.output("GPTEMP: I guess we give up here")
         return element
 
     def get_report_string(self, items):   # pylint: disable=no-self-use
